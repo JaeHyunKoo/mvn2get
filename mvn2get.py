@@ -542,6 +542,9 @@ SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
 
 def urlopen(url: str) -> Any:
     # urllib.request.urlopen has no formal type...
+    #proxy_support = urllib.request.ProxyHandler({'http' : 'http://'})
+    #opener = urllib.request.build_opener(proxy_support)
+    #urllib.request.install_opener(opener)
     if SSL_CONTEXT is None:
         return urllib.request.urlopen(url)
     else:
@@ -558,7 +561,7 @@ class ToDownload:
         self.required = required
 
 
-def download_artifact(dest_dir: str, artifact_id: str) -> None:
+def download_artifact(dest_dir: str, artifact_id: str, exclude: List = []) -> None:
     """
     Base function to download an artifact (as the user specified on the command
     line), with all its files, and perform the necessary checking on that
@@ -590,12 +593,34 @@ def download_artifact(dest_dir: str, artifact_id: str) -> None:
         download_file_list(to_download)
         verify_checksums(artifact_id, dest_path)
         deps = get_required_dependencies(dest_dir, dest_path)
+        
+        temp = []
+        for d in deps:
+            group = d[0].split(":")[0]
+            id = d[0].split(":")[1]
+            skipped = False
+            for exc in exclude:
+                if exc[0] == group :
+                    if exc[1] == "*" :
+                        skipped = True
+                        break
+                    elif id == exc[1] :
+                        skipped = True
+                        break
+                    if skipped :                        
+                        print("SKIP {0} pom {3} exclude {1}:{2}".format(d[0], exc[0], exc[1], artifact_id),end=EOL)
+                        
+            if skipped == False:
+                temp.append(d)
+        
+        deps = temp                
+        
         if CONFIG.recursive:
             for d in deps:
                 # Work has already been done to check if the dependency is in
-                # local URL or in the download directory.
+                # local URL or in the download directory.                
                 info("Downloading required dependency {0} from {1}".format(d, artifact_id))
-                download_artifact(dest_dir, d)
+                download_artifact(dest_dir, d[0], d[1])
         else:
             for d in deps:
                 add_problem(artifact_id, [], False, "requires missing dependency {0}".format(d))
@@ -968,12 +993,13 @@ def get_required_dependencies(outdir: str, path: str) -> List[str]:
         if parent is None:
             continue
         if parent.missing:
-            ret.append(parent.decl.id())
+            ret.append([parent.decl.id(), p.exclusion])
     for d in pom.dependencies:
         if d.optional or d.is_test:
             # Skip the dependency
             debug("skipping optional or test dependency {0}".format(d.id()))
             continue
+
         progress("loading dependent version info for {0}".format(d.id()))
         load_version_info(outdir, d)
         if d.is_vague_version():
@@ -1003,7 +1029,7 @@ def get_required_dependencies(outdir: str, path: str) -> List[str]:
             )
             continue
         if dp.missing:
-            ret.append(dp.decl.id())
+            ret.append([dp.decl.id(), d.exclusion])
     
     return ret
 
@@ -1286,6 +1312,14 @@ class Dependency:
         self.optional_text = xml_getnode_text(el, 'optional')
         self.scope = xml_getnode_text(el, 'scope')
         self.optional = self.optional_text == 'true'
+        self.exclusion = []
+        for exclusion_group in xml_getnodes(el, 'exclusions'):
+            for exclusion in xml_getnodes(exclusion_group, 'exclusion'):
+                groupId = xml_getnode_text(exclusion, 'groupId').strip()
+                artifactId = xml_getnode_text(exclusion, 'artifactId').strip()
+                ex = [groupId, artifactId]
+                self.exclusion.append(ex)
+        
         # is_test isn't really precise in its meaning anymore, but it works enough
         # for checking if the scope means it should be ignored.
         self.is_test = 'test' == self.scope or 'provided' == self.scope
